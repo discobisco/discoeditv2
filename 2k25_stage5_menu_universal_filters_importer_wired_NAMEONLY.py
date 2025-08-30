@@ -17,214 +17,15 @@ Adds:
 Draft Class submenu remains for quick default filters.
 """
 
-import os, sys, csv, json, re, importlib.util, tkinter as tk
+import os, sys, csv, json, re, importlib.util, unicodedata, tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-
-# -------------------------
-# Unified Gear Lookup Loader (from ./lookups/*.json)
-# -------------------------
-
-LOOKUP_DIR = os.path.join(os.path.dirname(__file__), "lookups")
-GEAR_LOOKUP_FILES = [
-    "gear_dropdowns.json",
-    "gear_lookups_index.json",
-    "lookups_from_ce_gear.json",
-    "shoes_gear.json",
-    "shoes_home.json",
-    "shoe_vendor_locked.json",
-    "sock_length.json",
-    "positions.json",
-    "Team_Data__Use_this_address_for_team_addresses_.json",
-]
-
-def _normalize_entry(e):
-    # normalize {'id':X, 'label':Y} or {'id':X, 'name':Y} into {'id':int, 'label':str}
-    if not isinstance(e, dict):
-        return None
-    lab = e.get("label")
-    if lab is None:
-        lab = e.get("name")
-    if lab is None:
-        lab = str(e.get("id",""))
-    try:
-        vid = int(e.get("id"))
-    except Exception:
-        # non-numeric or blank ids are kept as-is for now
-        vid = e.get("id")
-    return {"id": vid, "label": str(lab)}
-
-def _safe_load_json(path):
-    try:
-        import json
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-def _flatten_dictlike(root):
-    # If root is a dict of key -> list[entries], keep as-is.
-    # If root is a list of {key: [...]} blocks, merge them.
-    out = {}
-    if isinstance(root, dict):
-        return root
-    if isinstance(root, list):
-        for item in root:
-            if isinstance(item, dict):
-                for k, v in item.items():
-                    out.setdefault(k, [])
-                    out[k].extend(v if isinstance(v, list) else [v])
-    return out
-
-def _merge_lookups(dicts):
-    merged = {}
-    for d in dicts:
-        if not isinstance(d, dict):
-            continue
-        for k, v in d.items():
-            merged.setdefault(k, [])
-            if isinstance(v, list):
-                merged[k].extend(v)
-            else:
-                merged[k].append(v)
-    # normalize each list
-    for k, lst in merged.items():
-        norm = []
-        seen = set()
-        for e in lst:
-            ne = _normalize_entry(e) if isinstance(e, dict) else None
-            if ne is None:
-                continue
-            key = (ne["id"], ne["label"])
-            if key in seen:
-                continue
-            seen.add(key)
-            norm.append(ne)
-        # stable sort by label then id for UX
-        norm.sort(key=lambda x: (x["label"].lower(), (x["id"] if isinstance(x["id"], int) else 1_000_000)))
-        merged[k] = norm
-    return merged
-
-def load_gear_lookups(lookup_dir=LOOKUP_DIR, extra_files=None):
-    files = list(GEAR_LOOKUP_FILES)
-    if extra_files:
-        files.extend(list(extra_files))
-    dicts = []
-    for fname in files:
-        p = os.path.join(lookup_dir, fname)
-        if os.path.exists(p):
-            data = _safe_load_json(p)
-            data = _flatten_dictlike(data)
-            dicts.append(data)
-    return _merge_lookups(dicts)
-
-# Normalize key variants like "Edit Player / Shoes/Gear / Shoe Home" vs "Edit Player/Shoes/Gear/Shoe Home"
-_KEY_CLEAN_RE = re.compile(r"\s*/\s*")
-def normalize_lookup_key(k: str) -> str:
-    if not isinstance(k, str):
-        return ""
-    # collapse spaces and slashes
-    k2 = k.replace(" / ", "/").replace("  ", " ").strip()
-    parts = [p.strip() for p in _KEY_CLEAN_RE.split(k2) if p.strip()]
-    return "/".join(parts)
-
-def resolve_lookup(db, *aliases):
-    # try exact aliases, then normalized forms
-    for a in aliases:
-        if a in db:
-            return db[a]
-    norm = {normalize_lookup_key(k): k for k in db.keys()}
-    for a in aliases:
-        na = normalize_lookup_key(a)
-        k = norm.get(na)
-        if k is not None:
-            return db[k]
-    return []
-
-class GearDropdowns(tk.Toplevel):
-    """Simple UI to preview and use gear dropdown lists sourced from ./lookups JSONs."""
-    def __init__(self, master, gear_db):
-        super().__init__(master)
-        self.title("Gear Dropdowns")
-        self.geometry("700x520")
-        self.db = gear_db
-
-        # key selector
-        frm_top = ttk.Frame(self); frm_top.pack(fill=tk.X, padx=10, pady=8)
-        ttk.Label(frm_top, text="List key:").pack(side=tk.LEFT)
-        self.var_key = tk.StringVar()
-        keys_sorted = sorted(self.db.keys(), key=lambda k: normalize_lookup_key(k).lower())
-        self.cmb_key = ttk.Combobox(frm_top, values=keys_sorted, textvariable=self.var_key, width=80, state="readonly")
-        self.cmb_key.pack(side=tk.LEFT, padx=8, fill=tk.X, expand=True)
-        if keys_sorted:
-            self.var_key.set(keys_sorted[0])
-
-        # list selector
-        frm_mid = ttk.Frame(self); frm_mid.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
-        ttk.Label(frm_mid, text="Choice:").grid(row=0, column=0, sticky="w")
-        self.var_choice = tk.StringVar()
-        self.cmb_choice = ttk.Combobox(frm_mid, values=[], textvariable=self.var_choice, width=60, state="readonly")
-        self.cmb_choice.grid(row=0, column=1, sticky="ew", padx=8)
-        frm_mid.columnconfigure(1, weight=1)
-
-        # id + label display
-        self.var_id = tk.StringVar(value="")
-        ttk.Label(frm_mid, text="ID:").grid(row=1, column=0, sticky="w", pady=(10,0))
-        ent_id = ttk.Entry(frm_mid, textvariable=self.var_id, width=12, state="readonly"); ent_id.grid(row=1, column=1, sticky="w", pady=(10,0))
-
-        # buttons
-        frm_btn = ttk.Frame(self); frm_btn.pack(fill=tk.X, padx=10, pady=8)
-        ttk.Button(frm_btn, text="Copy ID", command=self.copy_id).pack(side=tk.LEFT)
-        ttk.Button(frm_btn, text="Copy Label", command=self.copy_label).pack(side=tk.LEFT, padx=8)
-        ttk.Button(frm_btn, text="Close", command=self.destroy).pack(side=tk.RIGHT)
-
-        # bindings
-        self.cmb_key.bind("<<ComboboxSelected>>", lambda e: self.refresh_choices())
-        self.cmb_choice.bind("<<ComboboxSelected>>", lambda e: self.on_choice())
-        self.refresh_choices()
-
-    def refresh_choices(self):
-        key = self.var_key.get()
-        items = self.db.get(key, [])
-        labels = [f'{it["label"]}  [{it["id"]}]' for it in items]
-        self.cmb_choice.configure(values=labels)
-        if labels:
-            self.var_choice.set(labels[0])
-            self.on_choice()
-        else:
-            self.var_choice.set("")
-            self.var_id.set("")
-
-    def on_choice(self):
-        key = self.var_key.get()
-        items = self.db.get(key, [])
-        label = self.var_choice.get()
-        try:
-            idx = self.cmb_choice["values"].index(label)
-        except Exception:
-            idx = -1
-        if 0 <= idx < len(items):
-            self.var_id.set(str(items[idx]["id"]))
-        else:
-            self.var_id.set("")
-
-    def copy_id(self):
-        self.clipboard_clear()
-        self.clipboard_append(self.var_id.get())
-
-    def copy_label(self):
-        # strip trailing [id]
-        val = self.var_choice.get()
-        if val.endswith("]") and "[" in val:
-            val = val[:val.rfind("[")].strip()
-        self.clipboard_clear()
-        self.clipboard_append(val)
 
 # -------------------------
 # Locate and load base editor
 # -------------------------
 
 CANDIDATES = [
-    "2k25_roster_editor_stage4_players_gear_hotzones.py",
+    "2k25_roster_editor_stage4_players_gear_hotzones_scrolled.py",
     "2k25_roster_editor_stage3_players_badges_grouped.py",
     "2k25_roster_editor_stage3_players_dropdowns.py",
     "2k25_roster_editor_stage3_players.py",
@@ -322,6 +123,19 @@ undo_manager = UndoRedo(base)
 base.write_bits = undo_manager.wrapper_write_bits  # patch
 
 # -------------------------
+
+# Name normalization for strict first+last matching only
+def _norm_name(s: str) -> str:
+    s = s or ""
+    # ASCII fold and collapse whitespace
+    s = unicodedata.normalize("NFKD", s)
+    s = s.encode("ascii", "ignore").decode("ascii")
+    s = " ".join(s.strip().lower().split())
+    # drop common suffix tokens
+    toks = [t for t in s.replace(",", "").split() if t not in {"jr", "sr", "ii", "iii", "iv"}]
+    return " ".join(toks)
+
+
 # Shared helpers
 # -------------------------
 
@@ -385,16 +199,28 @@ class BatchOps(tk.Toplevel):
         body = ttk.Frame(self); body.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
         left = ttk.Frame(body); left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         ttk.Label(left, text="Source Player").pack(anchor="w")
-        self.lst_src = tk.Listbox(left, height=10, exportselection=False)
-        self.lst_src.pack(fill=tk.X, pady=(0,8))
+        frm_src = ttk.Frame(left); frm_src.pack(fill=tk.X, pady=(0,8))
+        self.lst_src = tk.Listbox(frm_src, height=10, exportselection=False)
+        vs_src = ttk.Scrollbar(frm_src, orient=tk.VERTICAL, command=self.lst_src.yview)
+        self.lst_src.configure(yscrollcommand=vs_src.set)
+        self.lst_src.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        vs_src.pack(side=tk.LEFT, fill=tk.Y)
         ttk.Label(left, text="Target Players (multi-select)").pack(anchor="w")
-        self.lst_tgt = tk.Listbox(left, height=18, selectmode=tk.EXTENDED, exportselection=False)
-        self.lst_tgt.pack(fill=tk.BOTH, expand=True)
+        frm_tgt = ttk.Frame(left); frm_tgt.pack(fill=tk.BOTH, expand=True)
+        self.lst_tgt = tk.Listbox(frm_tgt, height=18, selectmode=tk.EXTENDED, exportselection=False)
+        vs_tgt = ttk.Scrollbar(frm_tgt, orient=tk.VERTICAL, command=self.lst_tgt.yview)
+        self.lst_tgt.configure(yscrollcommand=vs_tgt.set)
+        self.lst_tgt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs_tgt.pack(side=tk.LEFT, fill=tk.Y)
 
         right = ttk.Frame(body); right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10,0))
         ttk.Label(right, text="Fields in Category").pack(anchor="w")
-        self.lst_fields = tk.Listbox(right, height=24, selectmode=tk.EXTENDED, exportselection=False)
-        self.lst_fields.pack(fill=tk.BOTH, expand=True)
+        frm_fields = ttk.Frame(right); frm_fields.pack(fill=tk.BOTH, expand=True)
+        self.lst_fields = tk.Listbox(frm_fields, height=24, selectmode=tk.EXTENDED, exportselection=False)
+        vs_fields = ttk.Scrollbar(frm_fields, orient=tk.VERTICAL, command=self.lst_fields.yview)
+        self.lst_fields.configure(yscrollcommand=vs_fields.set)
+        self.lst_fields.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs_fields.pack(side=tk.LEFT, fill=tk.Y)
         self.chk_nonzero = tk.IntVar(value=0)
         ttk.Checkbutton(right, text="Only copy non-zero fields", variable=self.chk_nonzero).pack(anchor="w", pady=4)
 
@@ -495,13 +321,18 @@ class BatchOps(tk.Toplevel):
                     w.writerow([p.index, p.first, p.last, cat, name, hex(off), sb, ln, raw])
         messagebox.showinfo("Exported", f"Wrote {path}")
 
-    def import_csv(self):
+    
+def import_csv(self):
         path = filedialog.askopenfilename(filetypes=[("CSV","*.csv"),("All","*.*")])
-        if not path: return
-        idx_map = {int(p.index): p for p in self.players}
-        name_map = {f"{p.first} {p.last}".lower(): p for p in self.players}
-        rows, writes = 0, 0
-        with open(path,"r",encoding="utf-8") as f:
+        if not path:
+            return
+        # Build strict name-only map
+        pmap = {}
+        for p in self.players:
+            key = (_norm_name(p.first), _norm_name(p.last))
+            pmap.setdefault(key, []).append(p)
+        rows, writes, misses = 0, 0, 0
+        with open(path, "r", encoding="utf-8") as f:
             r = csv.DictReader(f)
             for row in r:
                 rows += 1
@@ -509,22 +340,29 @@ class BatchOps(tk.Toplevel):
                     cat = row.get("Category","")
                     if cat not in self.categories:
                         continue
-                    name = row.get("Field",""); off = row.get("Offset","0")
-                    off = int(off, 16) if str(off).lower().startswith("0x") else int(off)
-                    sb  = int(row.get("StartBit","0")); ln = int(row.get("Length","1")); raw = int(float(row.get("Raw","0")))
-                    p = None
-                    if row.get("PlayerIndex",""):
-                        try: p = idx_map.get(int(row["PlayerIndex"]))
-                        except Exception: p = None
-                    if p is None and row.get("First") and row.get("Last"):
-                        p = name_map.get(f'{row["First"]} {row["Last"]}'.lower())
-                    if p is None:
+                    off_s = row.get("Offset","0")
+                    off = int(off_s, 16) if str(off_s).lower().startswith("0x") else int(off_s)
+                    sb  = int(row.get("StartBit","0") or 0)
+                    ln  = int(row.get("Length","1") or 1)
+                    raw = int(float(row.get("Raw","0") or 0))
+                    fn  = _norm_name(row.get("First",""))
+                    lnme = _norm_name(row.get("Last",""))
+                    if not fn or not lnme:
+                        misses += 1
                         continue
-                    addr = p.addr + off
-                    ok = self.base.write_bits(self.gm, addr, 0, sb, ln, raw)
-                    writes += 1 if ok else 0
+                    matches = pmap.get((fn, lnme), [])
+                    if not matches:
+                        misses += 1
+                        continue
+                    # If multiple exact name matches, apply to all
+                    for p in matches:
+                        addr = p.addr + off
+                        ok = self.base.write_bits(self.gm, addr, 0, sb, ln, raw)
+                        writes += 1 if ok else 0
                 except Exception:
                     continue
+        messagebox.showinfo("Imported", f"Read {rows} rows. Applied {writes} writes. Name misses: {misses}.")
+
         messagebox.showinfo("Imported", f"Read {rows} rows. Applied {writes} writes.")
 
 # -------------------------
@@ -693,8 +531,12 @@ class FilterBuilder(tk.Toplevel):
 
         # Rules list
         mid = ttk.Frame(frm); mid.pack(fill=tk.BOTH, expand=True, pady=(8,8))
-        self.lst = tk.Listbox(mid, height=12)
-        self.lst.pack(fill=tk.BOTH, expand=True)
+        frm_rules = ttk.Frame(mid); frm_rules.pack(fill=tk.BOTH, expand=True)
+        self.lst = tk.Listbox(frm_rules, height=12)
+        vs_rules = ttk.Scrollbar(frm_rules, orient=tk.VERTICAL, command=self.lst.yview)
+        self.lst.configure(yscrollcommand=vs_rules.set)
+        self.lst.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs_rules.pack(side=tk.LEFT, fill=tk.Y)
 
         # Bottom actions + preview
         bot = ttk.Frame(frm); bot.pack(fill=tk.X)
@@ -1061,12 +903,6 @@ class ToolsMenu:
         menubar = tk.Menu(app)
         tools = tk.Menu(menubar, tearoff=0)
 
-        # Load gear lookups once
-        try:
-            self._gear_db = load_gear_lookups(LOOKUP_DIR)
-        except Exception:
-            self._gear_db = {}
-
         # Undo/Redo
         tools.add_command(label="Undo", accelerator="Ctrl+Z", command=self.undo_action)
         tools.add_command(label="Redo", accelerator="Ctrl+Y", command=self.redo_action)
@@ -1076,7 +912,8 @@ class ToolsMenu:
         tools.add_command(label="Batch Ops…", command=self.open_batch)
         tools.add_command(label="Sort Players…", command=self.open_sort)
         tools.add_command(label="Filter Builder…", command=self.open_filters)
-        tools.add_command(label="Gear Dropdowns…", command=self.open_gear_dropdowns)
+        _tools_add_import_export(tools, self)
+
 
         # Draft quick
         draft = tk.Menu(tools, tearoff=0)
@@ -1097,16 +934,7 @@ class ToolsMenu:
             pass
 
     # Actions
-    
-    def open_gear_dropdowns(self):
-        if not self._gear_db:
-            messagebox.showwarning("Lookups missing", "No gear lookups found in ./lookups. Place JSONs then reopen.")
-            return
-        try:
-            GearDropdowns(self.app, self._gear_db)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to open Gear Dropdowns: {e}")
-def undo_action(self):
+    def undo_action(self):
         self.undo.undo()
 
     def redo_action(self):
@@ -1125,6 +953,34 @@ def undo_action(self):
 
     def open_filters(self):
         self._get_filter_win().deiconify()
+    # --- Master CSV handlers ---
+    def import_master_match(self):
+        path = filedialog.askopenfilename(title="Select Master CSV", filetypes=[("CSV","*.csv"),("All","*.*")])
+        if not path: return
+        imp = MasterCSV(self.app, self.base)
+        logp = os.path.join(os.path.dirname(path), "import_log.txt")
+        writes, unmatched, skipped = imp.import_csv(path, mode="match_names", skip_blank=True, log_path=logp)
+        messagebox.showinfo("Import done", f"Writes: {writes}\nUnmatched rows: {unmatched}\nBlanks skipped: {skipped}\nLog: {logp}")
+
+    def import_master_order(self):
+        path = filedialog.askopenfilename(title="Select Master CSV", filetypes=[("CSV","*.csv"),("All","*.*")])
+        if not path: return
+        imp = MasterCSV(self.app, self.base)
+        logp = os.path.join(os.path.dirname(path), "import_log.txt")
+        writes, unmatched, skipped = imp.import_csv(path, mode="by_order", skip_blank=True, log_path=logp)
+        messagebox.showinfo("Import done", f"Writes: {writes}\nUnmatched rows: {unmatched}\nBlanks skipped: {skipped}\nLog: {logp}")
+
+    def export_master_selected(self):
+        sel = self.app.tree.selection() if hasattr(self.app, "tree") else []
+        path = filedialog.asksaveasfilename(title="Save Master CSV", defaultextension=".csv", filetypes=[("CSV","*.csv")], initialfile="Players_Master.csv")
+        if not path: return
+        imp = MasterCSV(self.app, self.base)
+        ok = imp.export_csv(path, template_csv=None, selection_only=bool(sel))
+        if ok:
+            messagebox.showinfo("Exported", f"Wrote {path}")
+        else:
+            messagebox.showerror("Export failed","Could not export.")
+
         self._filter_win.lift()
 
     # Draft helpers using FilterBuilder under the hood
@@ -1171,6 +1027,225 @@ def undo_action(self):
     def draft_restore(self):
         fb = self._get_filter_win()
         fb.restore_players()
+
+# -------------------------
+# CSV Import/Export (Master headers)
+# -------------------------
+
+class MasterCSV:
+    """Importer/Exporter that honors user CSV headers. Skips blanks. Two modes: match by First+Last or apply by order."""
+    def __init__(self, app, base_mod, offsets_template_csv=None):
+        self.app = app
+        self.base = base_mod
+        self.gm = app.gm
+        self.base_info, self.categories = self.base.load_offsets()
+        # Build name->(category, spec)
+        self.field_map = {}
+        for cat, fields in self.categories.items():
+            for f in fields:
+                name = str(f.get("name","")).strip()
+                if not name: 
+                    continue
+                # last one wins, but record duplicates
+                key = name.lower()
+                if key in self.field_map and self.field_map[key][0] != cat:
+                    # ambiguous; prefer previously stored; leave as-is
+                    pass
+                else:
+                    self.field_map[key] = (cat, f)
+        # Special: support First Name and Last Name if present as writable strings via Base offsets
+        base_info = self.base_info or {}
+        self.first_off = int(base_info.get("Offset First Name", "0") , 16) if isinstance(base_info.get("Offset First Name"), str) else int(base_info.get("Offset First Name") or 0)
+        self.last_off  = int(base_info.get("Offset Last Name",  "0") , 16) if isinstance(base_info.get("Offset Last Name"),  str) else int(base_info.get("Offset Last Name")  or 0)
+        self.appearance_off = int(base_info.get("Offset Appearance Data","0"),16) if isinstance(base_info.get("Offset Appearance Data"), str) else int(base_info.get("Offset Appearance Data") or 0)
+
+    def _addr_for_field(self, category, p_addr, off, name):
+        # Mirror helper logic in this file
+        if category == "Body":
+            n = (name or "").lower()
+            if n.startswith("height") or n.startswith("wingspan"):
+                return p_addr + self.appearance_off + off
+        return p_addr + off
+
+    def _parse_int(self, s):
+        if s is None: return None
+        s = str(s).strip()
+        if s == "": return None
+        # hex like 0x1A
+        try:
+            if s.lower().startswith("0x"):
+                return int(s,16)
+            return int(float(s))
+        except:
+            return None
+
+    def _parse_float_bits(self, s):
+        import struct
+        if s is None or str(s).strip() == "": 
+            return None
+        try:
+            fval = float(s)
+        except:
+            return None
+        # little-endian IEEE-754
+        return struct.unpack("<I", struct.pack("<f", fval))[0]
+
+    def import_csv(self, path, mode="match_names", skip_blank=True, log_path=None):
+        """
+        mode: 'match_names' or 'by_order'
+        skip_blank: True to keep existing values when CSV empty
+        """
+        import csv, time
+        if not path: 
+            return (0,0,0)
+        players = list(getattr(self.app, "players", []))
+        if not players:
+            messagebox.showerror("No players","Player list not loaded."); 
+            return (0,0,0)
+        # Build matching index
+        name_index = {f"{p.first} {p.last}".strip().lower(): p for p in players}
+        # Read CSV
+        rows = []
+        with open(path,"r",encoding="utf-8") as f:
+            r = csv.DictReader(f)
+            headers = r.fieldnames or []
+            for row in r:
+                rows.append(row)
+        total_rows = len(rows)
+        writes = 0
+        skipped_blank = 0
+        unmatched = 0
+        issues = []
+        for i,row in enumerate(rows):
+            # resolve target player
+            target = None
+            if mode == "match_names":
+                fn = str(row.get("First Name","") or "").strip()
+                ln = str(row.get("Last Name","") or "").strip()
+                key = f"{fn} {ln}".strip().lower()
+                target = name_index.get(key)
+                if not target:
+                    unmatched += 1
+                    issues.append(f"Row {i+2}: no match for '{fn} {ln}'")
+                    continue
+            else:
+                if i < len(players):
+                    target = players[i]
+                else:
+                    unmatched += 1
+                    issues.append(f"Row {i+2}: no player at position {i} for by_order mode")
+                    continue
+            # apply fields
+            for h, val in row.items():
+                if h is None:
+                    continue
+                name_key = h.strip().lower()
+                # skip control headers and identity headers
+                if name_key in ("first name","last name","playerindex","index","team","team name"):
+                    continue
+                if skip_blank and (val is None or str(val).strip() == ""):
+                    skipped_blank += 1
+                    continue
+                if name_key not in self.field_map:
+                    # header not recognized; ignore silently
+                    continue
+                cat, spec = self.field_map[name_key]
+                off = int(spec.get("offset", 0), 16) if isinstance(spec.get("offset"), str) else int(spec.get("offset") or 0)
+                sb  = int(spec.get("startBit", 0) or 0)
+                ln  = int(spec.get("length",   0) or 0)
+                addr = self._addr_for_field(cat, target.addr, off, h)
+                # Decide write value
+                if (h.strip().lower() == "weight") and ln == 32 and sb == 0:
+                    new_raw = self._parse_float_bits(val)
+                    if new_raw is None:
+                        continue
+                    ok = self.base.write_bits(self.app.gm, addr, 0, 0, 32, int(new_raw))
+                    writes += 1 if ok else 0
+                    continue
+                # default numeric
+                ival = self._parse_int(val)
+                if ival is None:
+                    # leave unchanged
+                    continue
+                ok = self.base.write_bits(self.app.gm, addr, 0, sb, ln if ln else 8, int(ival))
+                writes += 1 if ok else 0
+        # optional log
+        if log_path:
+            try:
+                with open(log_path,"w",encoding="utf-8") as f:
+                    f.write(f"Imported: {writes} writes over {total_rows} rows. Unmatched rows: {unmatched}. Blanks skipped: {skipped_blank}.\n")
+                    for line in issues:
+                        f.write(line+"\n")
+            except Exception:
+                pass
+        rebuild_player_tree(self.app)
+        return (writes, unmatched, skipped_blank)
+
+    def export_csv(self, path, template_csv=None, selection_only=False):
+        """Export using template headers if provided, else all known field names sorted by category then name."""
+        import csv
+        players = list(getattr(self.app, "players", []))
+        if selection_only:
+            try:
+                tree = self.app.tree
+                sel = tree.selection()
+                idxs = set(int(self.app.tree.item(i,"values")[0]) for i in sel)
+                players = [p for p in players if int(p.index) in idxs]
+            except Exception:
+                pass
+        if not players:
+            messagebox.showwarning("No players","Nothing to export.")
+            return False
+        headers = []
+        if template_csv:
+            try:
+                with open(template_csv,"r",encoding="utf-8") as f:
+                    r = csv.reader(f)
+                    headers = next(r)
+            except Exception:
+                headers = []
+        if not headers:
+            # default header list: identity + all mapped fields
+            headers = ["First Name","Last Name"]
+            names = sorted(set(k for k in self.field_map.keys()))
+            headers.extend([n for n in (name.title() for name in names)])  # title-case for aesthetics
+            # Better: use original keys exactly; keep as stored
+            headers = ["First Name","Last Name"] + sorted([k for k in self.field_map.keys()])
+        with open(path,"w",newline="",encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(headers)
+            for p in players:
+                row = []
+                # build a dict of readable values
+                values = {}
+                for key,(cat,spec) in self.field_map.items():
+                    off = int(spec.get("offset", 0), 16) if isinstance(spec.get("offset"), str) else int(spec.get("offset") or 0)
+                    sb  = int(spec.get("startBit", 0) or 0)
+                    ln  = int(spec.get("length",   0) or 0)
+                    addr = self._addr_for_field(cat, p.addr, off, key)
+                    raw  = self.base.read_bits(self.app.gm, addr, 0, sb, ln if ln else 8)
+                    values[key] = raw
+                # emit row in header order
+                for h in headers:
+                    lk = h.strip().lower()
+                    if lk == "first name":
+                        row.append(p.first)
+                    elif lk == "last name":
+                        row.append(p.last)
+                    elif lk in values:
+                        row.append(values[lk])
+                    else:
+                        row.append("")
+                w.writerow(row)
+        return True
+
+
+def _tools_add_import_export(menu, host):
+    """Extend Tools menu with CSV import/export items using MasterCSV."""
+    menu.add_separator()
+    menu.add_command(label="Import CSV (match First+Last)", command=host.import_master_match)
+    menu.add_command(label="Import CSV (apply by roster order)", command=host.import_master_order)
+    menu.add_command(label="Export CSV (selected → Master headers)", command=host.export_master_selected)
 
 # -------------------------
 # Launch base app with menu

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NBA 2K25 Roster Editor - Stage 3.2 (Players-first + Badge Groups)
+NBA 2K25 Roster Editor - Stage 4 (Players: Gear/Accessories/Hotzones)
 Windows-only. Live memory editing while NBA2K25 runs offline (EAC disabled).
 
-Adds to Stage 3.1:
-- Badges tab group filter: Finishing, Shooting, Playmaking, Defense, Rebounding, Personality, All.
-- Ordered rows per group lists below.
-- Badge editor now level/toggle aware: 3+ bit -> levels; 1 bit -> Off/On.
-- Still prefers offsets.json; falls back to Offsets.txt / unified_* / potion.txt.
+This builds on Stage 3.2:
+- New tabs: Gear, Accessories, Hotzones.
+- Dropdowns for Shoe Vendor, Sock Lengths, Hotzones (Cold/Neutral/Hot).
+- Optional Shoe ID name mapping via shoe_map.json or shoe_map.csv (id,name).
+- Hex support for "Colorway" 32-bit fields.
+
+Source of truth for offsets: offsets.json (preferred). Fallbacks: Offsets.txt, unified_offsets*.json|text, potion.txt.
 """
 
 import ctypes
@@ -19,7 +21,7 @@ from typing import Optional, List, Tuple, Dict, Any
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-APP_VERSION = "0.32"
+APP_VERSION = "0.40"
 MODULE_NAME = "NBA2K25.exe"
 
 # -----------------------------
@@ -149,35 +151,63 @@ PLAY_TYPES_REV = {v:k for k,v in PLAY_TYPES.items()}
 BADGE_LEVELS = ["Unequipped", "Bronze", "Silver", "Gold", "Hall Of Fame", "Legend"]
 BADGE_REV = {name.lower(): idx for idx, name in enumerate(BADGE_LEVELS)}
 
-# Badge groups with explicit order
-BADGE_GROUPS: Dict[str, List[str]] = {
-    "Finishing": [
-        "Float Game","Posterizer","Rise Up","Aerial Wizard","Hook Specialist",
-        "Layup Mixmaster","Paint Prodigy","Physical Finisher","Post Powerhouse",
-        "Post-Up Poet","Post Fade Phenom",
-    ],
-    "Shooting": [
-        "Deadeye","Limitless Range","Slippery Off-Ball","Mini Marksman",
-        "Set Shot Specialist","Shifty Shooter",
-    ],
-    "Playmaking": [
-        "Bail Out","Break Starter","Dimer","Handles for Days","Unpluckable",
-        "Versatile Visionary","Ankle Assassin","Lightning Launch","Strong Handle",
-    ],
-    "Defense": [
-        "Post Lockdown","Challenger","Off-Ball Pest","Pick Dodger","Glove",
-        "Interceptor","Pogo Stick","On-Ball Menace","High-Flying Denier",
-        "Paint Patroller","Brick Wall","Immovable Enforcer",
-    ],
-    "Rebounding": [
-        "Boxout Beast","Rebound Chaser",
-    ],
-    "Personality": [
-        "Reserved","Friendly","Team Player","Extremely Confident","Keep It Real",
-        "Pat My Back","Expressive","Unpredictable","Laid Back","Media Ringmaster",
-        "Warm Weather Fan","Finance Savvy","Alpha Dog","Enforcer","Work Ethic",
-    ],
+# Vendor list from CE tables (IDs stable across years)
+VENDOR_MAP = {
+     0:"None", 1:"Nike", 2:"Adidas", 3:"Jordan", 4:"Converse", 5:"Reebok",
+     6:"Under Armour", 7:"Spalding", 8:"Peak", 9:"Anta", 10:"Li Ning",
+    11:"And 1", 12:"Brand Black", 13:"K1X", 14:"BBB", 15:"Puma",
+    16:"Q4 Sports", 17:"New Balance", 18:"FILA", 19:"Rigorer", 20:"Qiaodan", 21:"361"
 }
+VENDOR_REV = {v.lower(): k for k,v in VENDOR_MAP.items()}
+
+SOCKS = {
+    0:"No Socks", 1:"Quarter Socks", 2:"Crew Socks", 3:"Crew Scrunch Socks",
+    4:"Tall Socks", 5:"Tall Scrunch Socks", 6:"Tall Squash Socks",
+    7:"Striped Long Socks", 8:"Striped Crew Socks", 9:"Striped Crew Scrunch Socks",
+    10:"Long Scrunch Socks", 11:"Striped Long Squash Socks", 12:"Striped Quarter Socks"
+}
+SOCKS_REV = {v.lower(): k for k,v in SOCKS.items()}
+
+HOTZONE_LABELS = ["Cold","Neutral","Hot"]
+HOTZONE_REV = {name.lower(): i for i,name in enumerate(HOTZONE_LABELS)}
+
+# optional shoe id -> name map
+def load_shoe_map(base_dir: str) -> Tuple[Dict[int, str], Dict[str, int]]:
+    m_id_to_name: Dict[int,str] = {}
+    m_name_to_id: Dict[str,int] = {}
+    # JSON first
+    p = os.path.join(base_dir, "shoe_map.json")
+    if os.path.isfile(p):
+        try:
+            obj = json.load(open(p,"r",encoding="utf-8"))
+            if isinstance(obj, dict):
+                for k,v in obj.items():
+                    try:
+                        i = int(k); s = str(v)
+                        m_id_to_name[i] = s
+                        m_name_to_id[s.lower()] = i
+                    except Exception:
+                        continue
+                return m_id_to_name, m_name_to_id
+        except Exception:
+            pass
+    # CSV fallback: id,name
+    p = os.path.join(base_dir, "shoe_map.csv")
+    if os.path.isfile(p):
+        try:
+            with open(p,"r",encoding="utf-8") as f:
+                r = csv.reader(f)
+                for row in r:
+                    if not row: continue
+                    try:
+                        i = int(row[0]); s = str(row[1])
+                        m_id_to_name[i] = s
+                        m_name_to_id[s.lower()] = i
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+    return m_id_to_name, m_name_to_id
 
 # -----------------------------
 # Memory helpers
@@ -417,7 +447,7 @@ def load_offsets() -> Tuple[Dict[str, Any], Dict[str, List[Dict[str, Any]]]]:
         pass
 
     # Fallback lightweight extractor
-    for cat in ("Body","Vitals","Attributes","Tendencies","Durability","Badges"):
+    for cat in ("Body","Vitals","Attributes","Tendencies","Durability","Badges","Hotzones","Accessories","Gear","Shoes/Gear"):
         m = re.search(rf'"{re.escape(cat)}"\s*:\s*\[', text)
         if not m: continue
         start = m.end()-1
@@ -540,7 +570,8 @@ def _norm(s: str) -> str:
 
 class CategoryGrid(ttk.Frame):
     def __init__(self, parent, gm: GameMemory, category_name: str,
-                 fields: List[Dict[str, Any]], base_info: Dict[str, Any]):
+                 fields: List[Dict[str, Any]], base_info: Dict[str, Any],
+                 shoe_map: Tuple[Dict[int,str], Dict[str,int]]):
         super().__init__(parent)
         self.gm = gm
         self.cat = category_name
@@ -548,14 +579,8 @@ class CategoryGrid(ttk.Frame):
         self.base_info = base_info
         self.player_addr: Optional[int] = None
         self.player_index: Optional[int] = None
+        self.shoe_id2name, self.shoe_name2id = shoe_map
         self.current_dropdown: Optional[List[str]] = None
-
-        # Badge grouping structures
-        self.group_var = None
-        self.order_map: Dict[str, Tuple[int,int]] = {}  # normname -> (group_idx, index)
-        self.group_members_norm: Dict[str, List[str]] = {}
-        if self.cat == "Badges":
-            self._init_badge_groups()
 
         # Toolbar
         bar = ttk.Frame(self); bar.pack(fill=tk.X, padx=6, pady=4)
@@ -564,14 +589,12 @@ class CategoryGrid(ttk.Frame):
         ttk.Button(bar, text="Export CSV", command=self.export_csv).pack(side=tk.LEFT, padx=12)
         ttk.Button(bar, text="Import CSV", command=self.import_csv).pack(side=tk.LEFT, padx=3)
 
-        # Optional Group filter
-        if self.cat == "Badges":
-            ttk.Label(bar, text="Group:").pack(side=tk.LEFT, padx=(16,4))
-            self.group_var = tk.StringVar(value="All")
-            choices = ["All"] + list(BADGE_GROUPS.keys())
-            self.cmb_group = ttk.Combobox(bar, state="readonly", values=choices, width=16, textvariable=self.group_var)
-            self.cmb_group.pack(side=tk.LEFT)
-            self.cmb_group.bind("<<ComboboxSelected>>", lambda _e: self.refresh())
+        # Hotzones bulk set
+        if self.cat.lower() == "hotzones":
+            ttk.Label(bar, text="Bulk:").pack(side=tk.LEFT, padx=(16,4))
+            ttk.Button(bar, text="All Cold", command=lambda: self._bulk_hotzones(0)).pack(side=tk.LEFT, padx=2)
+            ttk.Button(bar, text="All Neutral", command=lambda: self._bulk_hotzones(1)).pack(side=tk.LEFT, padx=2)
+            ttk.Button(bar, text="All Hot", command=lambda: self._bulk_hotzones(2)).pack(side=tk.LEFT, padx=2)
 
         # Tree
         cols = ("name","value","raw","offset","startBit","length")
@@ -579,7 +602,7 @@ class CategoryGrid(ttk.Frame):
         headers = ["Field","Value","Raw","Off","SB","Len"]
         for c,h in zip(cols, headers):
             self.tree.heading(c, text=h)
-            w = 260 if c=="name" else 110
+            w = 300 if c=="name" else 110
             if c in ("offset","startBit","length"): w = 70
             self.tree.column(c, width=w, anchor=tk.W)
         self.tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
@@ -588,84 +611,110 @@ class CategoryGrid(ttk.Frame):
         ed = ttk.Frame(self); ed.pack(fill=tk.X, padx=6, pady=4)
         ttk.Label(ed, text="Selected:").pack(side=tk.LEFT)
         self.sel_name = tk.StringVar(); self.sel_val = tk.StringVar(); self.sel_raw = tk.StringVar()
-        self.ent_name = ttk.Entry(ed, textvariable=self.sel_name, width=30, state="readonly")
+        self.ent_name = ttk.Entry(ed, textvariable=self.sel_name, width=34, state="readonly")
         self.ent_name.pack(side=tk.LEFT, padx=4)
         ttk.Label(ed, text="Value").pack(side=tk.LEFT, padx=(12,2))
-        self.ent_val = ttk.Entry(ed, textvariable=self.sel_val, width=18)
+        self.ent_val = ttk.Entry(ed, textvariable=self.sel_val, width=24)
         self.ent_val.pack(side=tk.LEFT)
-        self.cmb_val = ttk.Combobox(ed, state="readonly", width=22, values=[])
+        self.cmb_val = ttk.Combobox(ed, state="readonly", width=26, values=[])
         ttk.Label(ed, text="Raw").pack(side=tk.LEFT, padx=(12,2))
-        self.ent_raw = ttk.Entry(ed, textvariable=self.sel_raw, width=10)
+        self.ent_raw = ttk.Entry(ed, textvariable=self.sel_raw, width=12)
         self.ent_raw.pack(side=tk.LEFT)
         ttk.Button(ed, text="Write Field", command=self.write_selected).pack(side=tk.LEFT, padx=8)
 
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
-    def _init_badge_groups(self):
-        # Build order map and normalized members
-        for gi, (gname, items) in enumerate(BADGE_GROUPS.items()):
-            norm_items = [_norm(x) for x in items]
-            self.group_members_norm[gname] = norm_items
-            for ii, nm in enumerate(norm_items):
-                self.order_map[nm] = (gi, ii)
-
-    # Dropdown for field name
+    # Dropdown definition
     def _dropdown_for_field(self, name: str, ln: int) -> Optional[List[str]]:
         n = name.lower()
         if self.cat == "Vitals":
-            if n in ("position", "secondary position"):
-                return [POSITION_MAP[i] for i in sorted(POSITION_MAP.keys())]
-            if n == "play initiator":
-                return ["No", "Yes"]
-            if n.startswith("play type"):
-                return [PLAY_TYPES[i] for i in range(16)]
+            if n in ("position", "secondary position"): return [POSITION_MAP[i] for i in sorted(POSITION_MAP.keys())]
+            if n == "play initiator": return ["No", "Yes"]
+            if n.startswith("play type"): return [PLAY_TYPES[i] for i in range(16)]
         if self.cat == "Badges":
-            if ln == 1:
-                return ["Off","On"]
-            return BADGE_LEVELS[:]
+            return BADGE_LEVELS[:] if ln > 1 else ["Off","On"]
+        if self.cat.lower() == "hotzones":
+            return HOTZONE_LABELS[:]
+        if self.cat.lower() in ("gear","shoes/gear"):
+            if n == "shoe locked vendor": return list(VENDOR_MAP.values())
+            if n in ("sock length home","sock length away"): return list(SOCKS.values())
+            if n in ("shoe home","shoe away") and self.shoe_id2name:
+                # show names sorted by id
+                return [self.shoe_id2name[i] for i in sorted(self.shoe_id2name.keys())]
+        if self.cat == "Accessories":
+            # no global mapping; leave numeric
+            return None
         return None
 
+    def _display_is_hex(self, name: str, ln: int) -> bool:
+        n = name.lower()
+        if "colorway" in n and ln >= 16:  # 32-bit int color
+            return True
+        return False
+
     def _to_display(self, raw: int, ln: int, name: str) -> str:
-        if self.cat == "Tendencies":
-            return str(raw_to_tendency(raw, ln))
-        if self.cat in ("Attributes","Durability"):
-            return str(raw_to_attr(raw, ln))
+        if self.cat == "Tendencies": return str(raw_to_tendency(raw, ln))
+        if self.cat in ("Attributes","Durability"): return str(raw_to_attr(raw, ln))
         if self.cat == "Badges":
-            if ln == 1:
-                return "On" if raw else "Off"
-            return BADGE_LEVELS[raw] if 0 <= raw < len(BADGE_LEVELS) else BADGE_LEVELS[0]
+            return ("On" if raw else "Off") if ln == 1 else (BADGE_LEVELS[raw] if 0 <= raw < len(BADGE_LEVELS) else BADGE_LEVELS[0])
         if self.cat == "Vitals":
             n = name.lower()
-            if n in ("position","secondary position"):
-                return POSITION_MAP.get(raw, f"{raw}")
-            if n == "play initiator":
-                return "Yes" if raw else "No"
-            if n.startswith("play type"):
-                return PLAY_TYPES.get(raw, f"{raw}")
+            if n in ("position","secondary position"): return POSITION_MAP.get(raw, f"{raw}")
+            if n == "play initiator": return "Yes" if raw else "No"
+            if n.startswith("play type"): return PLAY_TYPES.get(raw, f"{raw}")
+            return str(raw)
+        catl = self.cat.lower()
+        if catl == "hotzones":
+            return HOTZONE_LABELS[raw] if 0 <= raw < len(HOTZONE_LABELS) else str(raw)
+        if catl in ("gear","shoes/gear"):
+            n = name.lower()
+            if self._display_is_hex(name, ln): return f"0x{raw:08X}"
+            if n == "shoe locked vendor": return VENDOR_MAP.get(raw, str(raw))
+            if n in ("sock length home","sock length away"):
+                return SOCKS.get(raw, str(raw))
+            if n in ("shoe home","shoe away") and self.shoe_id2name:
+                return self.shoe_id2name.get(raw, str(raw))
         return str(raw)
 
     def _from_display(self, disp: str, raw_text: str, ln: int, name: str) -> int:
+        # raw wins
         if raw_text.strip():
             try:
+                if raw_text.strip().lower().startswith("0x"):
+                    return int(raw_text.strip(), 16) & ((1<<ln)-1)
                 return max(0, min((1<<ln)-1, int(float(raw_text.strip()))))
             except Exception:
                 pass
-        if self.cat == "Tendencies":
-            return tendency_to_raw(float(disp or 0), ln)
-        if self.cat in ("Attributes","Durability"):
-            return attr_to_raw(float(disp or 0), ln)
+        if self.cat == "Tendencies": return tendency_to_raw(float(disp or 0), ln)
+        if self.cat in ("Attributes","Durability"): return attr_to_raw(float(disp or 0), ln)
         if self.cat == "Badges":
             if ln == 1:
                 return 1 if str(disp).strip().lower() in ("1","on","yes","true") else 0
             return BADGE_REV.get(disp.strip().lower(), 0)
         if self.cat == "Vitals":
             n = name.lower()
-            if n in ("position","secondary position"):
-                return POSITION_REV.get(disp.strip().upper(), 0)
-            if n == "play initiator":
-                return 1 if disp.strip().lower() in ("1","yes","true","on") else 0
-            if n.startswith("play type"):
-                return PLAY_TYPES_REV.get(disp.strip(), 0)
+            if n in ("position","secondary position"): return POSITION_REV.get(disp.strip().upper(), 0)
+            if n == "play initiator": return 1 if disp.strip().lower() in ("1","yes","true","on") else 0
+            if n.startswith("play type"): return PLAY_TYPES_REV.get(disp.strip(), 0)
+            try: return int(float(disp or 0))
+            except Exception: return 0
+        catl = self.cat.lower()
+        if catl == "hotzones":
+            return HOTZONE_REV.get(str(disp).strip().lower(), 0)
+        if catl in ("gear","shoes/gear"):
+            n = name.lower()
+            if self._display_is_hex(name, ln):
+                s = disp.strip().lower()
+                try:
+                    return int(s, 16) if s.startswith("0x") else int(s)
+                except Exception:
+                    return 0
+            if n == "shoe locked vendor":
+                return VENDOR_REV.get(str(disp).strip().lower(), 0)
+            if n in ("sock length home","sock length away"):
+                return SOCKS_REV.get(str(disp).strip().lower(), 0)
+            if n in ("shoe home","shoe away") and self.shoe_name2id:
+                return self.shoe_name2id.get(str(disp).strip().lower(), int(float(disp)))
         try:
             return int(float(disp or 0))
         except Exception:
@@ -684,33 +733,11 @@ class CategoryGrid(ttk.Frame):
         self.player_addr = addr
         self.refresh()
 
-    def _ordered_fields(self) -> List[Dict[str, Any]]:
-        if self.cat != "Badges":
-            return self.fields[:]
-        # Filter by selected group
-        sel = "All"
-        if hasattr(self, "group_var") and self.group_var is not None:
-            sel = self.group_var.get() or "All"
-        allowed: Optional[set[str]] = None
-        if sel != "All":
-            allowed = set(self.group_members_norm.get(sel, []))
-        # Assign sort keys
-        pairs = []
-        for f in self.fields:
-            nm = _norm(str(f["name"]))
-            if allowed is not None and nm not in allowed:
-                continue
-            key = self.order_map.get(nm, (999, 999, nm))
-            pairs.append((key, f))
-        pairs.sort(key=lambda x: x[0])
-        return [f for _, f in pairs]
-
     def refresh(self):
         self.tree.delete(*self.tree.get_children())
         if not self.player_addr:
             return
-        fields = self._ordered_fields()
-        for f in fields:
+        for f in self.fields:
             name = str(f["name"]); off = int(f["offset"]); sb = int(f.get("startBit", 0)); ln = int(f["length"])
             addr = self._addr_for_field(self.player_addr, off, name)
             raw  = read_bits(self.gm, addr, 0, sb, ln)
@@ -724,17 +751,15 @@ class CategoryGrid(ttk.Frame):
         name, disp, raw, off_hex, sb, ln = self.tree.item(sel[0], "values")
         self.sel_name.set(name); self.sel_val.set(str(disp)); self.sel_raw.set(str(raw))
         # Toggle dropdown if applicable
-        choices = self._dropdown_for_field(name, int(ln))
         try:
             self.cmb_val.pack_forget()
         except Exception:
             pass
+        choices = self._dropdown_for_field(name, int(ln))
         if choices:
             self.cmb_val['values'] = choices
-            try:
-                idx = choices.index(str(disp))
-            except ValueError:
-                idx = 0
+            try: idx = choices.index(str(disp))
+            except ValueError: idx = 0
             self.cmb_val.current(idx)
             self.cmb_val.pack(side=tk.LEFT)
         else:
@@ -794,7 +819,6 @@ class CategoryGrid(ttk.Frame):
                         except Exception:
                             pass
                     name = row.get("Field") or row.get("Name") or ""
-                    # find row
                     for iid in self.tree.get_children():
                         vals = self.tree.item(iid, "values")
                         if str(vals[0]).strip().lower() == name.strip().lower():
@@ -803,7 +827,10 @@ class CategoryGrid(ttk.Frame):
                             raw_in = row.get("Raw","")
                             disp_in = row.get("Value","")
                             if raw_in.strip():
-                                new_raw = max(0, min((1<<ln)-1, int(float(raw_in))))
+                                if raw_in.strip().lower().startswith("0x"):
+                                    new_raw = int(raw_in.strip(), 16) & ((1<<ln)-1)
+                                else:
+                                    new_raw = max(0, min((1<<ln)-1, int(float(raw_in))))
                             else:
                                 new_raw = self._from_display(disp_in, "", ln, name)
                             addr = self._addr_for_field(self.player_addr, off, name)
@@ -819,10 +846,57 @@ class CategoryGrid(ttk.Frame):
 # -----------------------------
 
 class App(tk.Tk):
+
+    # Global mouse-wheel scrolling for Treeview/Listbox/Text/Canvas
+    def _bind_global_scrollwheel(self, lines_per_notch: int = 3):
+        def _target_widget(evt):
+            # Widget under pointer with a yview
+            w = self.winfo_containing(evt.x_root, evt.y_root)
+            while w is not None and not hasattr(w, "yview"):
+                w = getattr(w, "master", None)
+            return w
+        def _on_wheel(evt):
+            w = _target_widget(evt)
+            if not w:
+                return
+            # Windows/Mac generate <MouseWheel> with evt.delta
+            if hasattr(evt, "delta") and evt.delta != 0:
+                # On Windows delta is multiples of 120
+                step = -1 * int(evt.delta / 120) * lines_per_notch
+                # On macOS delta is small integers; keep sign
+                if sys.platform == "darwin":
+                    step = -1 * int(evt.delta) * lines_per_notch
+                if step != 0:
+                    try:
+                        w.yview_scroll(step, "units")
+                    except Exception:
+                        pass
+                return "break"
+            return
+        def _on_btn4(evt):
+            w = _target_widget(evt)
+            if w:
+                try:
+                    w.yview_scroll(-lines_per_notch, "units")
+                except Exception:
+                    pass
+                return "break"
+        def _on_btn5(evt):
+            w = _target_widget(evt)
+            if w:
+                try:
+                    w.yview_scroll(lines_per_notch, "units")
+                except Exception:
+                    pass
+                return "break"
+        # Bind globally for all windows (including Toplevels created later)
+        self.bind_all("<MouseWheel>", _on_wheel, add="+")
+        self.bind_all("<Button-4>", _on_btn4, add="+")  # X11 up
+        self.bind_all("<Button-5>", _on_btn5, add="+")  # X11 down
     def __init__(self):
         super().__init__()
-        self.title(f"NBA 2K25 Roster Editor - Stage 3.2 v{APP_VERSION}")
-        self.geometry("1250x860"); self.minsize(1040, 700)
+        self.title(f"NBA 2K25 Roster Editor - Stage 4 v{APP_VERSION}")
+        self.geometry("1320x900"); self.minsize(1080, 720)
 
         if sys.platform != "win32":
             messagebox.showerror("Unsupported","Windows-only tool."); self.destroy(); return
@@ -841,9 +915,12 @@ class App(tk.Tk):
 
         # Normalize categories
         self.fields_by_cat: Dict[str, List[Dict[str,Any]]] = {}
-        for cat in ("Vitals","Attributes","Tendencies","Durability","Badges","Body"):
+        for cat in ("Vitals","Attributes","Tendencies","Durability","Badges","Body","Hotzones","Accessories","Gear","Shoes/Gear"):
             if cat in self.categories:
                 self.fields_by_cat[cat] = self._normalize(self.categories[cat])
+
+        # Prepare shoe map
+        self.shoe_id2name, self.shoe_name2id = load_shoe_map(os.path.dirname(os.path.abspath(__file__)))
 
         # State
         self.players: List[Player] = []
@@ -852,6 +929,8 @@ class App(tk.Tk):
 
         # UI
         self._build_ui()
+        # Enable mouse-wheel scrolling across all lists and trees
+        self._bind_global_scrollwheel(lines_per_notch=3)
         self._refresh_players()
 
     def _normalize(self, arr: List[Dict[str,Any]]) -> List[Dict[str,Any]]:
@@ -881,15 +960,24 @@ class App(tk.Tk):
         # Data tabs
         tab_data = ttk.Notebook(main); main.add(tab_data, text="Player Data")
         self.grids: Dict[str, CategoryGrid] = {}
-        for cat in ("Vitals","Attributes","Tendencies","Durability","Badges","Body"):
+        for cat in ("Vitals","Attributes","Tendencies","Durability","Badges","Body","Hotzones","Accessories"):
             if cat in self.fields_by_cat:
-                frame = CategoryGrid(tab_data, self.gm, cat, self.fields_by_cat[cat], self.base_info)
+                frame = CategoryGrid(tab_data, self.gm, cat, self.fields_by_cat[cat], self.base_info,
+                                     (self.shoe_id2name, self.shoe_name2id))
                 tab_data.add(frame, text=cat)
                 self.grids[cat] = frame
+        # Gear prefers "Gear" key; if only "Shoes/Gear" exists, show it as "Gear"
+        gear_key = "Gear" if "Gear" in self.fields_by_cat else ("Shoes/Gear" if "Shoes/Gear" in self.fields_by_cat else None)
+        if gear_key:
+            frame = CategoryGrid(tab_data, self.gm, gear_key, self.fields_by_cat[gear_key], self.base_info,
+                                 (self.shoe_id2name, self.shoe_name2id))
+            tab_data.add(frame, text="Gear")
+            self.grids["Gear"] = frame
 
     def _status(self) -> str:
         cats = ", ".join(self.fields_by_cat.keys()) if self.fields_by_cat else "none"
-        return f"Process: {'connected' if self.connected else 'not found'} | Categories loaded: {cats}"
+        shoe_map_status = f" | Shoe map: {'loaded' if self.shoe_id2name else 'not found'}"
+        return f"Process: {'connected' if self.connected else 'not found'} | Categories loaded: {cats}{shoe_map_status}"
 
     def _reconnect(self):
         self.gm.close(); self.connected = self.gm.open()
@@ -943,15 +1031,12 @@ class App(tk.Tk):
         if not sel: return
         vals = self.tree.item(sel[0], "values")
         idx = int(vals[0])
-        # compute address
         base = resolve_table_base(self.gm, PLAYER_PTR_CHAINS)
         if not base: return
         addr = base + idx*PLAYER_STRIDE
         self.selected_player_index = idx
         self.selected_player_addr = addr
-        # fill quick box
         self.q_first.set(str(vals[1])); self.q_last.set(str(vals[2])); self.q_face.set(str(vals[3]))
-        # push to grids
         for grid in self.grids.values():
             grid.set_player(idx, addr)
 
